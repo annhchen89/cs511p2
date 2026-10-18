@@ -34,4 +34,32 @@ fi
 
 # Start HDFS/Spark main here
 
+# Keep MP1's existing namespace when this container is restarted.
+set -euo pipefail
+mkdir -p /var/lib/hadoop/hdfs/namenode /var/lib/hadoop/hdfs/datanode \
+    /var/log/hadoop /var/run/hadoop /var/log/spark /var/run/spark
+if [ ! -f /var/lib/hadoop/hdfs/namenode/current/VERSION ]; then
+    hdfs namenode -format -nonInteractive
+fi
+hdfs --daemon start namenode
+hdfs --daemon start datanode
+"$SPARK_HOME/sbin/start-master.sh"
+
+# Readiness requires writable HDFS, not just a listening NameNode socket.
+deadline=$((SECONDS + 600))
+until hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'Safe mode is OFF'; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "HDFS did not leave safe mode; see /var/log/hadoop." >&2
+        exit 1
+    fi
+    sleep 2
+done
+hdfs dfs -mkdir -p /spark/checkpoints
+hdfs dfs -chmod 1777 /spark/checkpoints
+
+# Each container starts exactly one Spark worker. Its foreground process
+# keeps the container alive; executors are started when an application runs.
+export SPARK_NO_DAEMONIZE=1
+exec "$SPARK_HOME/sbin/start-worker.sh" spark://main:7077
+
 bash
