@@ -27,8 +27,9 @@ spark-submit --master spark://main:7077 indexer.py "$ARTICLES_URI" "$RANKS_URI" 
 # TODO: start your database if it runs as a service (or install it in the
 # Dockerfiles and start it in start-main.sh), and load the index into it,
 # e.g. hdfs dfs -cat "${INDEX_URI}/postings/part-*" | <your loader>.
-echo "TODO: load the index into your database (search/serve.sh)" >&2
-exit 1
+# echo "TODO: load the index into your database (search/serve.sh)" >&2
+# exit 1
+python3 -c 'import sys; from server import load_index; load_index(*sys.argv[1:])' "$INDEX_URI" "$DATABASE" "$ARTICLES_URI" "$RANKS_URI"
 
 # 3. Start the server in the background and wait until it answers.
 setsid nohup python3 server.py --port 8000 > /search/server.log 2>&1 < /dev/null &

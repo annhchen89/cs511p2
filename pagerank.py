@@ -58,7 +58,17 @@ def parse_article(line):
     """
     # TODO: implement. json.loads raises ValueError on invalid JSON; use
     # is_integer() for the id and for each link.
-    raise NotImplementedError("parse_article")
+    # raise NotImplementedError("parse_article")
+    try:
+        article = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(article, dict) or not is_integer(article.get("id")):
+        return None
+    links = article.get("links")
+    if not isinstance(links, list):
+        links = []
+    return article["id"], [target for target in links if is_integer(target)]
 
 
 def build_graph(lines):
@@ -75,7 +85,20 @@ def build_graph(lines):
     # valid ids: join the candidate edges (keyed by target) with the ids.
     # Finally attach the kept targets to every article, keeping the articles
     # that have none (cogroup or leftOuterJoin), and sort/deduplicate them.
-    raise NotImplementedError("build_graph")
+    # raise NotImplementedError("build_graph")
+    num_partitions = max(lines.context.defaultParallelism, 2)
+    articles = lines.map(parse_article).filter(lambda article: article is not None) \
+        .partitionBy(num_partitions)
+    valid_ids = articles.mapValues(lambda _: None)
+
+    # Deduplicate each source's links before the shuffle. Key by destination the join discards broken links without a driver-side set of all ids.
+    candidates = articles.flatMap(
+        lambda article: ((target, article[0]) for target in set(article[1])
+                         if target != article[0]))
+    targets = candidates.join(valid_ids, num_partitions).map(lambda pair: (pair[1][0], pair[0])).groupByKey(num_partitions).mapValues(lambda destinations: sorted(destinations))
+
+    # The left side contains all valid ids, including isolated pages.
+    return valid_ids.leftOuterJoin(targets, num_partitions).mapValues(lambda pair: pair[1] if pair[1] is not None else [])
 
 
 # --- PageRank -------------------------------------------------------------------
@@ -87,7 +110,11 @@ def contributions(targets, rank, damping):
     (no targets) sends nothing.
     """
     # TODO: implement.
-    raise NotImplementedError("contributions")
+    # raise NotImplementedError("contributions")
+    if not targets:
+        return []
+    share = damping * rank / len(targets)
+    return [(target, share) for target in targets]
 
 
 def pagerank_step(links, ranks, num_pages, damping, num_partitions, checkpoint=False):
@@ -115,7 +142,24 @@ def pagerank_step(links, ranks, num_pages, damping, num_partitions, checkpoint=F
     # 4. Keep the partitioner (mapValues), persist, call checkpoint() if
     #    asked, and only then run actions.
     # 5. delta = sum over pages of |new - old|.
-    raise NotImplementedError("pagerank_step")
+    # raise NotImplementedError("pagerank_step")
+    incoming = links.join(ranks, num_partitions).flatMap(lambda pair: contributions(pair[1][0], pair[1][1], damping)).reduceByKey(add, num_partitions).persist()
+    new_ranks = None
+    try:
+        # Only a scalar reaches the driver. Missing mass includes both the teleport probability and the entire mass of dangling pages.
+        redistributed = (1.0 - incoming.values().sum()) / num_pages
+        new_ranks = ranks.leftOuterJoin(incoming, num_partitions).mapValues(lambda pair: redistributed + (pair[1] if pair[1] is not None else 0.0)).persist()
+        if checkpoint:
+            new_ranks.checkpoint()
+        # This action materializes every new rank and its pending checkpoint before the caller releases the old ranks.
+        delta = new_ranks.join(ranks, num_partitions).values().map(lambda pair: abs(pair[0] - pair[1])).sum()
+        return new_ranks, delta
+    except Exception:
+        if new_ranks is not None:
+            new_ranks.unpersist()
+        raise
+    finally:
+        incoming.unpersist()
 
 
 def run_pagerank(links, num_pages, damping=DAMPING, epsilon=EPSILON,
@@ -132,7 +176,27 @@ def run_pagerank(links, num_pages, damping=DAMPING, epsilon=EPSILON,
     # max_iterations iterations, pass checkpoint=True every
     # `checkpoint_every` iterations, and unpersist the previous ranks.
     # Printing the delta of each iteration helps debugging.
-    raise NotImplementedError("run_pagerank")
+    # raise NotImplementedError("run_pagerank")
+    if num_pages == 0:
+        return links.mapValues(lambda _: 0.0).persist(), []
+    num_partitions = links.getNumPartitions()
+    ranks = links.mapValues(lambda _: 1.0 / num_pages).persist()
+    deltas = []
+    for iteration in range(1, max_iterations + 1):
+        checkpoint = checkpoint_every > 0 and iteration % checkpoint_every == 0
+        previous = ranks
+        try:
+            ranks, delta = pagerank_step(
+                links, previous, num_pages, damping, num_partitions, checkpoint)
+        except Exception:
+            previous.unpersist()
+            raise
+        previous.unpersist()
+        deltas.append(delta)
+        print("PAGERANK ITERATION: %d DELTA: %.12e" % (iteration, delta), flush=True)
+        if delta <= epsilon:
+            break
+    return ranks, deltas
 
 
 # --- Given code -----------------------------------------------------------------

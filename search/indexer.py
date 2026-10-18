@@ -77,13 +77,32 @@ def build_postings(articles, num_articles):
     # collections.Counter), group the (article_id, tf) pairs by term, and
     # turn each tf into tf * ln(num_articles / df), where df is the number
     # of articles in the term's group.
-    raise NotImplementedError("build_postings")
+    # raise NotImplementedError("build_postings")
+    num_partitions = max(articles.context.defaultParallelism, 2)
+    term_frequencies = articles.flatMap(
+        lambda article: ((term, (article[0], frequency)) for term, frequency in Counter(tokenize(article[2])).items()))
+
+    def weights(postings):
+        postings = list(postings)
+        inverse_frequency = math.log(num_articles / len(postings))
+        return [(article_id, frequency * inverse_frequency)
+                for article_id, frequency in sorted(postings)]
+
+    return term_frequencies.groupByKey(num_partitions).mapValues(weights)
 
 
 def build_docs(articles, ranks):
     """Return an RDD of (article_id, (rank, title)) for every valid article."""
     # TODO: join each article's title with its rank.
-    raise NotImplementedError("build_docs")
+    # raise NotImplementedError("build_docs")
+    def attach_rank(pair):
+        title, rank = pair
+        if rank is None:
+            raise ValueError("Every valid article must have a PageRank value; check ranks_uri")
+        return rank, title
+
+    titles = articles.map(lambda article: (article[0], article[1]))
+    return titles.leftOuterJoin(ranks, max(articles.context.defaultParallelism, 2)).mapValues(attach_rank)
 
 
 # --- Given code -----------------------------------------------------------------
